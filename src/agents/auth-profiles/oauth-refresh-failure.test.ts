@@ -14,6 +14,7 @@ import {
   classifyOAuthRefreshFailureError,
   formatOAuthRefreshFailureLoginCommandMarkdown,
   OAuthRefreshFailureError,
+  resolveOAuthRefreshFailurePresentation,
 } from "./oauth-refresh-failure.js";
 
 describe("buildAuthProfileUnusableHint", () => {
@@ -108,19 +109,33 @@ describe("oauth refresh failure hints", () => {
     );
   });
 
-  it("classifies typed refresh failures without parsing the display message", () => {
-    expect(
-      classifyOAuthRefreshFailureError(
-        new OAuthRefreshFailureError({
-          provider: "openai",
-          profileId: "openai:user@example.com",
-          message: "invalid_grant",
-        }),
-      ),
-    ).toEqual({
+  it.each([
+    "refresh_token_reused",
+    "invalid_grant",
+    "sign_in_again",
+    "invalid_refresh_token",
+    "token_invalidated",
+    "revoked",
+    null,
+  ] as const)("preserves the typed %s reason without parsing display text", (reason) => {
+    const failure = new OAuthRefreshFailureError({
       provider: "openai",
       profileId: "openai:user@example.com",
-      reason: "invalid_grant",
+      message: "diagnostic text without a reason token",
+      reason,
+      summary: "Please sign in again.",
+      diagnostic: "OpenAI OAuth refresh failed (HTTP 400).",
+    });
+
+    expect(classifyOAuthRefreshFailureError(failure)).toEqual({
+      provider: "openai",
+      profileId: "openai:user@example.com",
+      reason,
+    });
+    expect(resolveOAuthRefreshFailurePresentation(failure)).toEqual({
+      summary: "Please sign in again.",
+      diagnostic: "OpenAI OAuth refresh failed (HTTP 400).",
+      reason,
     });
   });
 

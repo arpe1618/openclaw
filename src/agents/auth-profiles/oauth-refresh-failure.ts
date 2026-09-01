@@ -24,6 +24,60 @@ type OAuthRefreshFailure = {
   reason: OAuthRefreshFailureReason | null;
 };
 
+type OAuthRefreshFailurePresentation = {
+  diagnostic?: string;
+  reason: OAuthRefreshFailureReason | null;
+  status?: number;
+  summary: string;
+};
+
+export function resolveOAuthRefreshFailurePresentation(
+  err: unknown,
+): OAuthRefreshFailurePresentation | null {
+  const seen = new Set<object>();
+  let candidate = err;
+  while (candidate && typeof candidate === "object") {
+    const record = candidate as {
+      cause?: unknown;
+      diagnostic?: unknown;
+      name?: unknown;
+      reason?: unknown;
+      status?: unknown;
+      summary?: unknown;
+    };
+    const isOwnedFailure =
+      candidate instanceof OAuthRefreshFailureError ||
+      record.name === "OpenAICodexTokenFailureError";
+    if (isOwnedFailure && typeof record.summary === "string" && record.summary.trim()) {
+      const reason =
+        typeof record.reason === "string"
+          ? classifyOAuthRefreshFailureReason(record.reason)
+          : record.reason === null
+            ? null
+            : undefined;
+      return {
+        summary: record.summary.trim(),
+        ...(typeof record.diagnostic === "string" && record.diagnostic.trim()
+          ? { diagnostic: record.diagnostic.trim() }
+          : {}),
+        reason: reason ?? null,
+        ...(typeof record.status === "number" &&
+        Number.isInteger(record.status) &&
+        record.status >= 100 &&
+        record.status <= 599
+          ? { status: record.status }
+          : {}),
+      };
+    }
+    if (seen.has(candidate)) {
+      return null;
+    }
+    seen.add(candidate);
+    candidate = record.cause;
+  }
+  return null;
+}
+
 type StructuredClaudeCliAuthFailure = {
   provider?: unknown;
   rawError?: unknown;
@@ -33,16 +87,35 @@ type StructuredClaudeCliAuthFailure = {
 
 /** Error type that carries provider and classified OAuth refresh failure reason. */
 export class OAuthRefreshFailureError extends Error {
+  readonly diagnostic?: string;
   readonly provider: string;
   readonly profileId?: string;
   readonly reason: OAuthRefreshFailureReason | null;
+  readonly status?: number;
+  readonly summary?: string;
 
-  constructor(params: { provider: string; profileId?: string; message: string; cause?: unknown }) {
+  constructor(params: {
+    provider: string;
+    profileId?: string;
+    message: string;
+    cause?: unknown;
+    diagnostic?: string;
+    reason?: OAuthRefreshFailureReason | null;
+    status?: number;
+    summary?: string;
+  }) {
     super(params.message, { cause: params.cause });
+    const inherited = resolveOAuthRefreshFailurePresentation(params.cause);
     this.name = "OAuthRefreshFailureError";
+    this.diagnostic = params.diagnostic ?? inherited?.diagnostic;
     this.provider = params.provider;
     this.profileId = params.profileId;
-    this.reason = classifyOAuthRefreshFailureReason(params.message);
+    this.reason =
+      params.reason === undefined
+        ? (inherited?.reason ?? classifyOAuthRefreshFailureReason(params.message))
+        : params.reason;
+    this.status = params.status ?? inherited?.status;
+    this.summary = params.summary ?? inherited?.summary;
   }
 }
 
@@ -155,13 +228,14 @@ export function classifyOAuthRefreshFailureReason(
     return "token_invalidated";
   }
   if (
+    lower.includes("sign_in_again") ||
     lower.includes("signing in again") ||
     lower.includes("sign in again") ||
     lower.includes("log in again")
   ) {
     return "sign_in_again";
   }
-  if (lower.includes("invalid refresh token")) {
+  if (lower.includes("invalid_refresh_token") || lower.includes("invalid refresh token")) {
     return "invalid_refresh_token";
   }
   if (lower.includes("expired or revoked") || lower.includes("revoked")) {

@@ -29,7 +29,7 @@ import {
   resolveOpenAICallbackHost,
   resolveOpenAIRedirectUri,
 } from "./openai-chatgpt-oauth-authorization.runtime.js";
-import { loginOpenAICodex } from "./openai-chatgpt-oauth-flow.runtime.js";
+import { loginOpenAICodex, refreshOpenAICodexToken } from "./openai-chatgpt-oauth-flow.runtime.js";
 import {
   exchangeOpenAIAuthorizationCode,
   refreshOpenAIAccessToken,
@@ -123,6 +123,71 @@ afterEach(() => {
 });
 
 describe("OpenAI Codex OAuth flow", () => {
+  it("separates a concise refresh failure from allowlisted diagnostics", async () => {
+    const providerMessage =
+      "Your refresh token has already been used to generate a new access token. Please try signing in again.";
+    const responseBody = {
+      error: {
+        message: providerMessage,
+        type: "invalid_request_error",
+        code: "refresh_token_reused",
+        refresh_token: "must-not-leak",
+      },
+      access_token: "must-not-leak",
+    };
+    mockTokenResponse(responseBody, 401);
+
+    await expect(refreshOpenAIAccessToken("old-refresh-token")).resolves.toEqual({
+      type: "failed",
+      status: 401,
+      reason: "refresh_token_reused",
+      summary: providerMessage,
+      diagnostic:
+        "OpenAI Codex token refresh failed (HTTP 401; code=refresh_token_reused; type=invalid_request_error).",
+    });
+
+    mockTokenResponse(responseBody, 401);
+    const error = await refreshOpenAICodexToken("old-refresh-token").then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({
+      name: "OpenAICodexTokenFailureError",
+      status: 401,
+      reason: "refresh_token_reused",
+      summary: providerMessage,
+      diagnostic:
+        "OpenAI Codex token refresh failed (HTTP 401; code=refresh_token_reused; type=invalid_request_error).",
+    });
+    expect(String(error)).not.toContain("must-not-leak");
+    expect(String(error)).not.toContain('"error"');
+  });
+
+  it.each([
+    ["malformed JSON", "{not-json", undefined],
+    ["unknown JSON", JSON.stringify({ access_token: "must-not-leak" }), undefined],
+    [
+      "oversized recognized JSON",
+      JSON.stringify({
+        error: { message: "x".repeat(501), code: "refresh_token_reused" },
+      }),
+      "refresh_token_reused",
+    ],
+    ["plain text", "refresh_token=must-not-leak", undefined],
+  ])(
+    "uses a bounded generic refresh failure for non-allowlisted %s",
+    async (_name, body, reason) => {
+      mockTokenResponseText(body, 401);
+
+      await expect(refreshOpenAIAccessToken("old-refresh-token")).resolves.toEqual({
+        type: "failed",
+        status: 401,
+        ...(reason ? { reason } : {}),
+        summary: "OpenAI Codex token refresh failed (HTTP 401).",
+      });
+    },
+  );
+
   it("cancels provider login before opening the OAuth flow", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -282,7 +347,7 @@ describe("OpenAI Codex OAuth flow", () => {
     );
     expect(result).toMatchObject({
       type: "failed",
-      message: "OpenAI Codex token exchange timed out after 5ms",
+      summary: "OpenAI Codex token exchange timed out after 5ms",
     });
   });
 
@@ -334,7 +399,7 @@ describe("OpenAI Codex OAuth flow", () => {
     expect(ssrfMocks.fetchWithSsrFGuard).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       type: "failed",
-      message: "Login cancelled",
+      summary: "Login cancelled",
     });
   });
 
@@ -352,7 +417,7 @@ describe("OpenAI Codex OAuth flow", () => {
 
     expect(result).toEqual({
       type: "failed",
-      message: "OpenAI Codex token exchange response missing fields: expires_in",
+      summary: "OpenAI Codex token exchange response missing fields: expires_in",
     });
   });
 
@@ -375,7 +440,7 @@ describe("OpenAI Codex OAuth flow", () => {
 
       expect(result).toEqual({
         type: "failed",
-        message: `OpenAI Codex token ${operation} failed: response is not valid JSON`,
+        summary: `OpenAI Codex token ${operation} failed: response is not valid JSON`,
       });
     },
   );
@@ -393,7 +458,7 @@ describe("OpenAI Codex OAuth flow", () => {
     );
     expect(result).toMatchObject({
       type: "failed",
-      message: "OpenAI Codex token refresh timed out after 5ms",
+      summary: "OpenAI Codex token refresh timed out after 5ms",
     });
   });
 
@@ -408,7 +473,7 @@ describe("OpenAI Codex OAuth flow", () => {
 
     expect(result).toEqual({
       type: "failed",
-      message: "OpenAI Codex token refresh response missing fields: expires_in",
+      summary: "OpenAI Codex token refresh response missing fields: expires_in",
     });
   });
 
@@ -519,7 +584,7 @@ describe("OpenAI Codex OAuth bounded token response reads", () => {
 
         expect(result).toEqual({
           type: "failed",
-          message: `OpenAI Codex token ${operation} failed: expected JSON object response`,
+          summary: `OpenAI Codex token ${operation} failed: expected JSON object response`,
         });
         expect(release).toHaveBeenCalledOnce();
       } finally {
@@ -597,7 +662,7 @@ describe("OpenAI Codex OAuth bounded token response reads", () => {
       );
 
       expect(result).toMatchObject({ type: "failed" });
-      expect((result as { type: "failed"; message: string }).message).toContain("too large");
+      expect((result as { type: "failed"; summary: string }).summary).toContain("too large");
       expect(release).toHaveBeenCalledOnce();
     } finally {
       await closeServer(server);

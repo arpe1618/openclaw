@@ -414,7 +414,7 @@ describe("session lifecycle state", () => {
     );
 
     expect(failed.status).toBe("failed");
-    expect(failed.lastRunError).toMatch(/^Provider credits exhausted details/);
+    expect(failed.lastRunError).toBe("Provider credits exhausted");
     expect(failed.lastRunError?.length).toBeLessThanOrEqual(160);
     expect(failed.lastRunError).not.toContain("\n");
 
@@ -425,6 +425,32 @@ describe("session lifecycle state", () => {
     });
     expect(restarted.status).toBe("running");
     expect(restarted.lastRunError).toBeUndefined();
+  });
+
+  it("persists only the OAuth summary when live detail follows in a second paragraph", async () => {
+    const summary =
+      "⚠️ Your refresh token has already been used to generate a new access token. Please try signing in again.";
+    const failure = await persistLifecycle(
+      {
+        sessionId: "session-id",
+        updatedAt: 1_000,
+        startedAt: 1_050,
+        status: "running",
+      },
+      {
+        ts: 2_000,
+        sessionId: "session-id",
+        data: {
+          phase: "error",
+          endedAt: 1_800,
+          error: `${summary}\n\nOpenAI Codex token refresh failed (HTTP 401; code=refresh_token_reused).`,
+        },
+      },
+    );
+
+    expect(failure.lastRunError).toBe(summary);
+    expect(failure.lastRunError).not.toContain("HTTP 401");
+    expect(failure.lastRunError).not.toContain("{");
   });
 
   it("keeps an explicitly yielded parent pending until continuation starts", async () => {

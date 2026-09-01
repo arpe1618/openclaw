@@ -31,6 +31,11 @@ const loadGatewaySessionLifecycleSnapshotMock = vi.hoisted(() => vi.fn());
 const logErrorMock = vi.fn();
 const normalizeLiveAssistantBufferedTextMock = vi.hoisted(() => vi.fn());
 const loadGatewaySessionRow = vi.hoisted(() => vi.fn());
+const oauthRefreshSummary =
+  "⚠️ Your refresh token has already been used to generate a new access token. Please try signing in again.";
+const oauthRefreshDiagnostic =
+  "OpenAI Codex token refresh failed (HTTP 401; code=refresh_token_reused; type=invalid_request_error).";
+const oauthRefreshDisplay = `${oauthRefreshSummary}\n\n${oauthRefreshDiagnostic}`;
 
 vi.mock("../logger.js", () => ({
   logError: (...args: unknown[]) => logErrorMock(...args),
@@ -3239,7 +3244,7 @@ describe("agent event handler", () => {
       sessionId: "session-recovery",
       lifecycleGeneration: activeLifecycleGeneration,
     });
-    const { chatRunState, clearAgentRunContext, handler } = createHarness({
+    const { broadcast, chatRunState, clearAgentRunContext, handler } = createHarness({
       resolveSessionKeyForRun: () => "session-recovery",
       lifecycleErrorRetryGraceMs: 100,
       resolveActiveLifecycleGenerationForRun: () => activeLifecycleGeneration,
@@ -3252,7 +3257,7 @@ describe("agent event handler", () => {
       "lifecycle",
       {
         phase: "error",
-        error: "retryable provider failure",
+        error: oauthRefreshDisplay,
         endedAt: 2_000,
       },
       {
@@ -3306,6 +3311,19 @@ describe("agent event handler", () => {
     vi.advanceTimersByTime(100);
     expect(chatRunState.registry.peek("shared-run")).toBeDefined();
     expect(clearAgentRunContext).not.toHaveBeenCalled();
+    expect(
+      chatBroadcastCalls(broadcast).some(
+        ([, payload]) =>
+          (payload as { errorMessage?: string }).errorMessage === oauthRefreshDisplay,
+      ),
+    ).toBe(false);
+    expect(
+      persistGatewaySessionLifecycleEventMock.mock.calls.some(
+        ([params]) =>
+          (params as { event?: { data?: { error?: string } } }).event?.data?.error ===
+          oauthRefreshDisplay,
+      ),
+    ).toBe(false);
   });
 
   it("cancels deferred lifecycle errors when the handler is disposed", () => {
@@ -4253,7 +4271,7 @@ describe("agent event handler", () => {
 
     emitAgentEvent(handler, "run-terminal-final-failure", "lifecycle", {
       phase: "error",
-      error: "LLM request failed: network connection error.",
+      error: oauthRefreshDisplay,
       fallbackExhaustedFailure: true,
     });
 
@@ -4264,14 +4282,19 @@ describe("agent event handler", () => {
     };
     expect(finalPayload.state).toBe("error");
     expect(finalPayload.runId).toBe("run-terminal-final-failure");
-    expect(finalPayload.errorMessage).toContain("network connection error");
+    expect(finalPayload.errorMessage).toBe(oauthRefreshDisplay);
     expect(clearAgentRunContext).toHaveBeenCalledWith("run-terminal-final-failure");
     expect(agentRunSeq.has("run-terminal-final-failure")).toBe(false);
     expect(
       persistGatewaySessionLifecycleEventMock.mock.calls.some(
         ([params]) =>
-          (params as { event?: { data?: { fallbackExhaustedFailure?: boolean } } }).event?.data
-            ?.fallbackExhaustedFailure === true,
+          (
+            params as {
+              event?: { data?: { error?: string; fallbackExhaustedFailure?: boolean } };
+            }
+          ).event?.data?.fallbackExhaustedFailure === true &&
+          (params as { event?: { data?: { error?: string } } }).event?.data?.error ===
+            oauthRefreshDisplay,
       ),
     ).toBe(true);
   });
@@ -4364,7 +4387,7 @@ describe("agent event handler", () => {
 
     emitAgentEvents(handler, "run-terminal-retry", [
       ["lifecycle", { phase: "start" }],
-      ["lifecycle", { phase: "error", error: "attempt failed" }],
+      ["lifecycle", { phase: "error", error: oauthRefreshDisplay }],
       ["lifecycle", { phase: "start" }],
     ]);
 
@@ -4383,6 +4406,80 @@ describe("agent event handler", () => {
           (params as { event?: { data?: { phase?: string } } }).event?.data?.phase === "error",
       ),
     ).toHaveLength(0);
+  });
+
+  it("replaces a deferred OAuth failure with the final fallback error", () => {
+    vi.useFakeTimers();
+    const { broadcast, handler } = createHarness({
+      resolveSessionKeyForRun: () => "session-terminal-fallback",
+      lifecycleErrorRetryGraceMs: 100,
+    });
+    registerAgentRunContext("run-terminal-fallback", {
+      sessionKey: "session-terminal-fallback",
+    });
+
+    emitAgentEvent(handler, "run-terminal-fallback", "lifecycle", {
+      phase: "error",
+      error: oauthRefreshDisplay,
+    });
+    emitAgentEvent(handler, "run-terminal-fallback", "lifecycle", {
+      phase: "error",
+      error: "Final fallback failed.",
+      fallbackExhaustedFailure: true,
+    });
+    vi.advanceTimersByTime(100);
+
+    const errors = chatBroadcastCalls(broadcast)
+      .map(([, payload]) => payload as { errorMessage?: string; state?: string })
+      .filter((payload) => payload.state === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.errorMessage).toBe("Final fallback failed.");
+    expect(errors[0]?.errorMessage).not.toContain(oauthRefreshDiagnostic);
+    expect(
+      persistGatewaySessionLifecycleEventMock.mock.calls.some(
+        ([params]) =>
+          (params as { event?: { data?: { error?: string } } }).event?.data?.error ===
+          oauthRefreshDisplay,
+      ),
+    ).toBe(false);
+  });
+
+  it("drops a deferred OAuth failure when the run is cancelled", () => {
+    vi.useFakeTimers();
+    const { broadcast, handler } = createHarness({
+      resolveSessionKeyForRun: () => "session-terminal-cancel",
+      lifecycleErrorRetryGraceMs: 100,
+    });
+    registerAgentRunContext("run-terminal-cancel", {
+      sessionKey: "session-terminal-cancel",
+    });
+
+    emitAgentEvents(handler, "run-terminal-cancel", [
+      ["lifecycle", { phase: "start" }],
+      ["lifecycle", { phase: "error", error: oauthRefreshDisplay }],
+      ["lifecycle", { phase: "end", aborted: true, stopReason: "rpc" }],
+    ]);
+    vi.advanceTimersByTime(100);
+
+    const terminal = chatBroadcastCalls(broadcast).at(-1)?.[1] as {
+      errorMessage?: string;
+      state?: string;
+    };
+    expect(terminal.state).toBe("aborted");
+    expect(terminal.errorMessage).toBeUndefined();
+    expect(
+      chatBroadcastCalls(broadcast).some(
+        ([, payload]) =>
+          (payload as { errorMessage?: string }).errorMessage === oauthRefreshDisplay,
+      ),
+    ).toBe(false);
+    expect(
+      persistGatewaySessionLifecycleEventMock.mock.calls.some(
+        ([params]) =>
+          (params as { event?: { data?: { error?: string } } }).event?.data?.error ===
+          oauthRefreshDisplay,
+      ),
+    ).toBe(false);
   });
 
   it.each([

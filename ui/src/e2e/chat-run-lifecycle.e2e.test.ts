@@ -29,8 +29,10 @@ suite.define(() => {
     const currentPage = await context.newPage();
     page = currentPage;
     const sessionKey = "agent:main:main";
-    const diagnostic = "⚠️ ✉️ Message failed: delivery unavailable near 🧭";
-    const renderedDiagnostic = "Message failed: delivery unavailable near 🧭";
+    const diagnostic =
+      "⚠️ Your refresh token has already been used to generate a new access token. Please try signing in again.";
+    const renderedDiagnostic =
+      "Your refresh token has already been used to generate a new access token. Please try signing in again.";
     const gateway = await installMockGateway(currentPage, {
       sessionKey,
       // Account recovery can replace startup with a scoped history request.
@@ -72,6 +74,8 @@ suite.define(() => {
     await alert.waitFor();
     await alert.locator(".chat-error__content > strong").getByText(renderedDiagnostic).waitFor();
     expect(await alert.locator("details").count()).toBe(0);
+    expect(await alert.textContent()).not.toContain("HTTP 401");
+    expect(await alert.textContent()).not.toContain("{");
     await gateway.resolveDeferred("chat.send", { runId, status: "started" });
     await currentPage.getByRole("button", { name: "Stop generating" }).waitFor();
     await gateway.emitChatFinal({ sessionKey, runId, text: "Recovery completed." });

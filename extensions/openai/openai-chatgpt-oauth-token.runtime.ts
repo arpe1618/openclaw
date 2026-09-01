@@ -1,11 +1,18 @@
+import { normalizeDiagnosticValue } from "openclaw/plugin-sdk/diagnostic-runtime";
 import {
   resolveOAuthTokenExpiresAt,
   resolveOAuthTokenLifetimeMs,
   throwIfOAuthLoginAborted,
 } from "openclaw/plugin-sdk/provider-oauth-runtime";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
+import { redactSensitiveText } from "openclaw/plugin-sdk/security-runtime";
 import { fetchWithSsrFGuard, type SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
-import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  asOptionalRecord,
+  isRecord,
+  normalizeBoundedOptionalString,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
@@ -16,9 +23,16 @@ const OAUTH_TOKEN_SSRF_POLICY = {
 } satisfies SsrFPolicy;
 const TOKEN_REQUEST_TIMEOUT_MS = 30_000;
 const OAUTH_TOKEN_RESPONSE_BODY_LIMIT_BYTES = 1 * 1024 * 1024;
+const OAUTH_TOKEN_ERROR_SUMMARY_MAX_CHARS = 500;
 
 type TokenSuccess = { type: "success"; access: string; refresh: string; expires: number };
-type TokenFailure = { type: "failed"; message: string; status?: number };
+type TokenFailure = {
+  type: "failed";
+  summary: string;
+  diagnostic?: string;
+  reason?: string;
+  status?: number;
+};
 type TokenResult = TokenSuccess | TokenFailure;
 type TokenResponseJson = {
   access_token?: string;
@@ -29,6 +43,61 @@ type TokenRequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
 };
+
+function normalizeErrorSummary(value: unknown): string | undefined {
+  const normalized = normalizeBoundedOptionalString(
+    value,
+    OAUTH_TOKEN_ERROR_SUMMARY_MAX_CHARS,
+  )?.replace(/\s+/gu, " ");
+  if (!normalized) {
+    return undefined;
+  }
+  return normalizeBoundedOptionalString(
+    redactSensitiveText(normalized),
+    OAUTH_TOKEN_ERROR_SUMMARY_MAX_CHARS,
+  );
+}
+
+function buildOpenAITokenFailure(params: {
+  operation: "exchange" | "refresh";
+  response: Response;
+  text: string;
+}): TokenFailure {
+  let root: Record<string, unknown> | undefined;
+  try {
+    root = asOptionalRecord(JSON.parse(params.text));
+  } catch {
+    // Non-JSON responses use the bounded generic summary below.
+  }
+  const nested = asOptionalRecord(root?.error);
+  const normalizeFact = (value: unknown) => {
+    const normalized = normalizeOptionalString(value);
+    return normalizeDiagnosticValue(normalized, "") || undefined;
+  };
+  const code = normalizeFact(
+    nested?.code ?? (typeof root?.error === "string" ? root.error : root?.code),
+  );
+  const type = normalizeFact(nested?.type ?? root?.type);
+  const summary =
+    normalizeErrorSummary(nested?.message ?? root?.error_description ?? root?.message) ??
+    `OpenAI Codex token ${params.operation} failed (HTTP ${params.response.status}).`;
+  const facts = [
+    `HTTP ${params.response.status}`,
+    code ? `code=${code}` : undefined,
+    type ? `type=${type}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  const diagnostic =
+    summary.startsWith("OpenAI Codex token ") || facts.length === 1
+      ? undefined
+      : `OpenAI Codex token ${params.operation} failed (${facts.join("; ")}).`;
+  return {
+    type: "failed",
+    status: params.response.status,
+    ...(code ? { reason: code } : {}),
+    summary,
+    ...(diagnostic ? { diagnostic } : {}),
+  };
+}
 
 function formatMissingTokenResponseFields(
   json: TokenResponseJson,
@@ -110,11 +179,7 @@ async function readOpenAITokenResponse(
 ): Promise<TokenResult> {
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    return {
-      type: "failed",
-      status: response.status,
-      message: `OpenAI Codex token ${operation} failed (${response.status}): ${text || response.statusText}`,
-    };
+    return buildOpenAITokenFailure({ operation, response, text });
   }
   let json: TokenResponseJson;
   try {
@@ -122,13 +187,13 @@ async function readOpenAITokenResponse(
   } catch {
     return {
       type: "failed",
-      message: `OpenAI Codex token ${operation} failed: response is not valid JSON`,
+      summary: `OpenAI Codex token ${operation} failed: response is not valid JSON`,
     };
   }
   if (!isRecord(json)) {
     return {
       type: "failed",
-      message: `OpenAI Codex token ${operation} failed: expected JSON object response`,
+      summary: `OpenAI Codex token ${operation} failed: expected JSON object response`,
     };
   }
   const expires = resolveOAuthTokenExpiresAt(json.expires_in);
@@ -136,7 +201,7 @@ async function readOpenAITokenResponse(
   if (!json.access_token || !refreshToken || expires === undefined) {
     return {
       type: "failed",
-      message: `OpenAI Codex token ${operation} response missing fields: ${formatMissingTokenResponseFields(json, existingRefreshToken)}`,
+      summary: `OpenAI Codex token ${operation} response missing fields: ${formatMissingTokenResponseFields(json, existingRefreshToken)}`,
     };
   }
   return {
@@ -169,7 +234,7 @@ export async function exchangeOpenAIAuthorizationCode(
   } catch (error) {
     return {
       type: "failed",
-      message: formatTokenRequestError("exchange", error, timeoutMs, options.signal),
+      summary: formatTokenRequestError("exchange", error, timeoutMs, options.signal),
     };
   }
   return await readOpenAITokenResponse(response, "exchange");
@@ -193,7 +258,7 @@ export async function refreshOpenAIAccessToken(
   } catch (error) {
     return {
       type: "failed",
-      message: formatTokenRequestError("refresh", error, timeoutMs, options.signal),
+      summary: formatTokenRequestError("refresh", error, timeoutMs, options.signal),
     };
   }
 }

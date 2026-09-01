@@ -5,8 +5,10 @@ import { CHAT_TRANSCRIPT_END_THRESHOLD_PX } from "../pages/chat/scroll.ts";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import {
   chatThreadDistanceFromBottom,
+  copiedViaExec,
   createChatFlowE2eSuite,
   installMockGateway,
+  installPlainHttpClipboardCapture,
   requireRecord,
   requireString,
   scrollChatThreadToTop,
@@ -405,6 +407,7 @@ suite.define(() => {
           : {}),
       });
       const page = await context.newPage();
+      await installPlainHttpClipboardCapture(page);
       const gateway = await installMockGateway(page);
 
       try {
@@ -447,9 +450,11 @@ suite.define(() => {
           ts: Date.now(),
         });
 
-        const gatewayErrorText =
-          "⚠️ Model login expired on the gateway for openai. Send `/login codex` from a private chat or Web UI session to pair a new Codex login, or re-auth with `openclaw models auth login --provider openai` in a terminal, then try again.";
-        const errorText = gatewayErrorText.replace(/^⚠️\s*/u, "");
+        const summary =
+          "Your refresh token has already been used to generate a new access token. Please try signing in again.";
+        const diagnostic =
+          "OpenAI Codex token refresh failed (HTTP 401; code=refresh_token_reused; type=invalid_request_error).";
+        const gatewayErrorText = `⚠️ ${summary}\n\n${diagnostic}`;
         await gateway.emitGatewayEvent("chat", {
           errorMessage: gatewayErrorText,
           message: {
@@ -473,12 +478,28 @@ suite.define(() => {
           await page.screenshot({ path: path.join(artifactDir, `terminal-partial-${label}.png`) });
         }
         const alert = page.locator(".chat-error");
-        await alert.getByText("Error details", { exact: true }).click();
-        await alert.getByText(errorText, { exact: true }).waitFor({ timeout: 10_000 });
-        await alert.getByText("Error details", { exact: true }).click();
+        await alert.locator("strong").getByText(summary, { exact: true }).waitFor();
+        const disclosure = alert.locator("summary");
+        await disclosure.focus();
+        await page.keyboard.press("Enter");
+        const details = alert.locator(".chat-error__diagnostic");
+        await details.waitFor({ state: "visible" });
+        expect((await details.textContent())?.trim()).toBe(`${summary}\n\n${diagnostic}`);
+        const selected = await details.evaluate((element) => {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+          return selection?.toString() ?? "";
+        });
+        expect(selected.trim()).toBe(`${summary}\n\n${diagnostic}`);
+        await alert.getByRole("button", { name: "Copy error" }).click();
+        await expect.poll(() => copiedViaExec(page)).toEqual([gatewayErrorText]);
+        await page.keyboard.press("Enter");
         expect(await alert.getByRole("button", { name: "Dismiss error" }).count()).toBe(0);
         expect(await alert.getByRole("button", { name: "Retry", exact: true }).count()).toBe(0);
-        expect(await page.locator(".chat-thread-inner").getByText(errorText).count()).toBe(0);
+        expect(await page.locator(".chat-thread-inner").getByText(summary).count()).toBe(0);
         const [alertBox, composerBox] = await Promise.all([
           alert.boundingBox(),
           page.locator(".agent-chat__composer-shell").boundingBox(),

@@ -17,7 +17,10 @@ import {
 } from "./constants.js";
 import { hasUsableOAuthCredential } from "./credential-state.js";
 import { shouldMirrorRefreshedOAuthCredential } from "./oauth-identity.js";
-import { OAuthRefreshFailureError } from "./oauth-refresh-failure.js";
+import {
+  OAuthRefreshFailureError,
+  resolveOAuthRefreshFailurePresentation,
+} from "./oauth-refresh-failure.js";
 import {
   buildRefreshContentionError,
   isGlobalRefreshLockTimeoutError,
@@ -224,10 +227,22 @@ function formatRedactedOAuthRefreshError(error: unknown, secrets: string[]): str
 function createRedactedOAuthRefreshCause(cause: unknown, secrets: string[]): Error {
   const redacted = formatRedactedOAuthRefreshError(cause, secrets);
   const sanitized = new Error(redacted);
+  const presentation = resolveOAuthRefreshFailurePresentation(cause);
   if (cause instanceof Error && cause.name) {
     sanitized.name = cause.name;
   }
-  return sanitized;
+  return presentation
+    ? Object.assign(sanitized, {
+        summary: formatRedactedOAuthRefreshError(presentation.summary, secrets),
+        ...(presentation.diagnostic
+          ? {
+              diagnostic: formatRedactedOAuthRefreshError(presentation.diagnostic, secrets),
+            }
+          : {}),
+        reason: presentation.reason,
+        ...(presentation.status === undefined ? {} : { status: presentation.status }),
+      })
+    : sanitized;
 }
 
 function loadStoredOAuthRefreshStore(agentDir?: string): AuthProfileStore {

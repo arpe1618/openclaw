@@ -1714,6 +1714,7 @@ export function createAgentEventHandler({
       // the runId. Once the runner marks fallback as exhausted, clear chat state
       // immediately so webchat sessions do not stay in progress until the timer.
       if (isAborted || isFallbackExhaustedFailure || lifecycleErrorRetryGraceMs <= 0) {
+        clearPendingTerminalLifecycleError(evt.runId);
         // finalizeLifecycleEvent clears the buffer itself, after emitChatTerminal
         // has flushed the throttled tail and resolved the terminal message.
         finalizeLifecycleEvent(evt, { skipChatErrorFinal, restartRecoveryState });

@@ -1,4 +1,5 @@
 import { readStringValue } from "@openclaw/normalization-core/string-coerce";
+import { resolveOAuthRefreshFailurePresentation } from "../../agents/auth-profiles/oauth-refresh-failure.js";
 import { getFailoverErrorCode } from "../../agents/failover/error.js";
 import { renderFailoverCodeUserCopy } from "../../agents/failover/user-copy.js";
 import { AGENT_RUN_RESTART_ABORT_STOP_REASON } from "../../agents/run-termination.js";
@@ -24,6 +25,18 @@ const DEFERRED_TERMINAL_METADATA_KEYS = [
   "livenessState",
   "replayInvalid",
 ] as const;
+
+function formatOAuthRefreshFailureDisplay(error: unknown): string | undefined {
+  const presentation = resolveOAuthRefreshFailurePresentation(error);
+  if (!presentation) {
+    return undefined;
+  }
+  const diagnostic =
+    presentation.diagnostic && presentation.diagnostic !== presentation.summary
+      ? `\n\n${presentation.diagnostic}`
+      : "";
+  return `⚠️ ${presentation.summary}${diagnostic}`;
+}
 
 export function resolveAgentLifecycleTerminalMetadata(meta: unknown): Record<string, unknown> {
   const metadata: Record<string, unknown> = {};
@@ -103,6 +116,7 @@ export function createAgentLifecycleTerminalBackstop(params: {
     } else if (phase === "error") {
       data.error =
         renderFailoverCodeUserCopy(getFailoverErrorCode(resultOrError)) ??
+        formatOAuthRefreshFailureDisplay(resultOrError) ??
         formatErrorMessage(resultOrError);
       Object.assign(data, terminationFields);
     } else {

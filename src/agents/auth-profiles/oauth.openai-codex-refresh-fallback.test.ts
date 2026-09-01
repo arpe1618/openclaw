@@ -1119,6 +1119,46 @@ describe("resolveApiKeyForProfile openai refresh fallback", () => {
     expect(String(failure)).not.toContain("no column named updated_at");
   });
 
+  it("preserves structured refresh presentation through manager and outer wrappers", async () => {
+    const profileId = "openai:default";
+    const summary =
+      "Your refresh token has already been used to generate a new access token. Please try signing in again.";
+    const diagnostic =
+      "OpenAI Codex token refresh failed (HTTP 401; code=refresh_token_reused; type=invalid_request_error).";
+    saveAuthProfileStore(createExpiredOauthStore({ profileId, provider: "openai" }), agentDir, {
+      filterExternalAuthProfiles: false,
+      syncExternalCli: false,
+    });
+    refreshProviderOAuthCredentialWithPluginMock.mockRejectedValueOnce(
+      Object.assign(new Error(`${summary}\n\n${diagnostic}`), {
+        name: "OpenAICodexTokenFailureError",
+        diagnostic,
+        reason: "refresh_token_reused",
+        status: 401,
+        summary,
+      }),
+    );
+
+    const failure = await resolveApiKeyForProfile({
+      store: ensureAuthProfileStore(agentDir),
+      profileId,
+      agentDir,
+      forceRefresh: true,
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(OAuthRefreshFailureError);
+    expect(failure).toMatchObject({
+      provider: "openai",
+      profileId,
+      reason: "refresh_token_reused",
+      status: 401,
+      summary,
+      diagnostic,
+    });
+    expect(String(failure)).not.toContain('"error"');
+    expect(String(failure)).not.toContain("refresh_token=");
+  });
+
   it("clears stale lastGood before selecting an alternate Codex OAuth profile", async () => {
     const staleProfileId = "openai:default";
     const healthyProfileId = "openai:user@example.test";

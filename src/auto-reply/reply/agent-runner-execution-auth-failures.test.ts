@@ -91,9 +91,19 @@ describe("executeAgentTurn: authentication failures", () => {
   });
 
   it("keeps Codex login recovery actionable on Control UI turns", async () => {
+    const summary =
+      "Your refresh token has already been used to generate a new access token. Please try signing in again.";
+    const diagnostic =
+      "OpenAI Codex token refresh failed (HTTP 401; code=refresh_token_reused; type=invalid_request_error).";
     state.isInternalMessageChannelMock.mockReturnValue(true);
     state.runEmbeddedAgentMock.mockRejectedValueOnce(
-      new OAuthRefreshFailureError({ provider: "openai", message: "refresh_token_reused" }),
+      new OAuthRefreshFailureError({
+        provider: "openai",
+        message: `${summary}\n\n${diagnostic}`,
+        reason: "refresh_token_reused",
+        summary,
+        diagnostic,
+      }),
     );
     const followupRun = createFollowupRun();
     followupRun.run.messageProvider = "webchat";
@@ -113,6 +123,10 @@ describe("executeAgentTurn: authentication failures", () => {
       );
       expect(result.payload.presentation).toEqual(CODEX_LOGIN_PRESENTATION);
     }
+    const logged = state.runtimeErrorMock.mock.calls.flat().join("\n");
+    expect(logged).toContain(diagnostic);
+    expect(logged).not.toContain('"error"');
+    expect(logged).not.toContain("must-not-leak");
   });
 
   it("surfaces gateway reauth guidance from typed OAuth refresh failures", async () => {

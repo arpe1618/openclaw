@@ -132,7 +132,10 @@ function resolveSessionRunError(
   if ((status !== "failed" && status !== "timeout") || !outcome.error) {
     return undefined;
   }
-  const sanitized = renderUserFacingText(outcome.error, { errorContext: true })
+  // Live events may include a second diagnostic paragraph. Session rows retain
+  // only the bounded summary so reconnect never promotes details into the headline.
+  const summary = outcome.error.split(/\r?\n/u).find((line) => line.trim()) ?? outcome.error;
+  const sanitized = renderUserFacingText(summary, { errorContext: true })
     .replace(/\s+/g, " ")
     .trim();
   return sanitized ? truncateUtf16Safe(sanitized, SESSION_RUN_ERROR_MAX_CHARS) : undefined;
