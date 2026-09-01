@@ -498,8 +498,10 @@ describe("native Talk through the public OpenAI plugin registration", () => {
           expect(
             readSessionTranscriptMessageEvents({ agentId: AGENT_ID, sessionId: SESSION_ID }),
           ).toMatchObject(
-            [text, text].map((transcript) => ({
-              event: { message: { role: "user", content: [{ type: "text", text: transcript }] } },
+            [text, text].map((transcriptText) => ({
+              event: {
+                message: { role: "user", content: [{ type: "text", text: transcriptText }] },
+              },
             })),
           );
           if (text === "Status?") {
