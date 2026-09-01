@@ -108,6 +108,7 @@ import {
 import { broadcastChatError } from "./server-methods/chat-broadcast.js";
 import { deriveGatewaySessionLifecycleSnapshot } from "./session-lifecycle-state.js";
 import { loadSessionEntry } from "./session-utils.js";
+import type { GatewaySessionRow } from "./session-utils.types.js";
 
 function waitForFast<T>(
   callback: () => T | Promise<T>,
@@ -4307,20 +4308,30 @@ describe("agent event handler", () => {
     const clientRunId = "client-oauth-composed";
     const sessionKey = "session-oauth-composed";
     const lifecycleGeneration = getAgentEventLifecycleGeneration();
-    let persistedRow = {
+    let persistedRow: GatewaySessionRow = {
       key: sessionKey,
-      kind: "direct" as const,
+      kind: "direct",
       sessionId: sessionKey,
       updatedAt: 1_000,
-      status: "running" as const,
+      status: "running",
       startedAt: 1_000,
       abortedLastRun: false,
     };
     vi.mocked(loadGatewaySessionRow).mockImplementation(() => persistedRow);
     persistGatewaySessionLifecycleEventMock.mockImplementation(async ({ event }) => {
+      const session = {
+        abortedLastRun: persistedRow.abortedLastRun ?? undefined,
+        endedAt: persistedRow.endedAt ?? undefined,
+        lastRunError: persistedRow.lastRunError ?? undefined,
+        lastRunId: persistedRow.lastRunId ?? undefined,
+        runtimeMs: persistedRow.runtimeMs ?? undefined,
+        startedAt: persistedRow.startedAt ?? undefined,
+        status: persistedRow.status,
+        updatedAt: persistedRow.updatedAt ?? undefined,
+      };
       persistedRow = {
         ...persistedRow,
-        ...deriveGatewaySessionLifecycleSnapshot({ session: persistedRow, event }),
+        ...deriveGatewaySessionLifecycleSnapshot({ session, event }),
       };
     });
     const { broadcast, broadcastToConnIds, chatRunState, handler, sessionEventSubscribers } =
