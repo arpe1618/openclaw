@@ -95,11 +95,18 @@ describe("executeAgentTurn: authentication failures", () => {
       "Your refresh token has already been used to generate a new access token. Please try signing in again.";
     const diagnostic =
       "OpenAI Codex token refresh failed (HTTP 401; code=refresh_token_reused; type=invalid_request_error).";
+    const rawProviderBody = `OAuth token refresh failed for openai: {
+      "error": {
+        "message": "${summary}",
+        "refresh_token": "must-not-leak"
+      },
+      "access_token": "must-not-leak"
+    }`;
     state.isInternalMessageChannelMock.mockReturnValue(true);
     state.runEmbeddedAgentMock.mockRejectedValueOnce(
       new OAuthRefreshFailureError({
         provider: "openai",
-        message: `${summary}\n\n${diagnostic}`,
+        message: rawProviderBody,
         reason: "refresh_token_reused",
         summary,
         diagnostic,
@@ -124,8 +131,11 @@ describe("executeAgentTurn: authentication failures", () => {
       expect(result.payload.presentation).toEqual(CODEX_LOGIN_PRESENTATION);
     }
     const logged = state.runtimeErrorMock.mock.calls.flat().join("\n");
+    expect(logged).toContain(summary);
     expect(logged).toContain(diagnostic);
     expect(logged).not.toContain('"error"');
+    expect(logged).not.toContain('"refresh_token"');
+    expect(logged).not.toContain('"access_token"');
     expect(logged).not.toContain("must-not-leak");
   });
 

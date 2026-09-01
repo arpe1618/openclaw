@@ -5,11 +5,13 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveDefaultAgentId } from "../agents/agent-scope-config.js";
+import { OAuthRefreshFailureError } from "../agents/auth-profiles/oauth-refresh-failure.js";
 import { buildAssistantStreamData } from "../agents/embedded-agent-subscribe.handlers.messages.stream.js";
 import {
   INTERNAL_RUNTIME_CONTEXT_BEGIN,
   INTERNAL_RUNTIME_CONTEXT_END,
 } from "../agents/internal-runtime-context.js";
+import { createAgentLifecycleTerminalBackstop } from "../auto-reply/reply/agent-lifecycle-terminal.js";
 import { formatChannelProgressDraftLine } from "../channels/streaming.js";
 import {
   emitAgentEvent as emitRuntimeAgentEvent,
@@ -104,6 +106,7 @@ import {
   type AgentEventHandlerOptions,
 } from "./server-chat.js";
 import { broadcastChatError } from "./server-methods/chat-broadcast.js";
+import { deriveGatewaySessionLifecycleSnapshot } from "./session-lifecycle-state.js";
 import { loadSessionEntry } from "./session-utils.js";
 
 function waitForFast<T>(
@@ -4297,6 +4300,99 @@ describe("agent event handler", () => {
             oauthRefreshDisplay,
       ),
     ).toBe(true);
+  });
+
+  it("composes OAuth lifecycle delivery with selected-session summary persistence", async () => {
+    const runId = "run-oauth-composed";
+    const clientRunId = "client-oauth-composed";
+    const sessionKey = "session-oauth-composed";
+    const lifecycleGeneration = getAgentEventLifecycleGeneration();
+    let persistedRow = {
+      key: sessionKey,
+      kind: "direct" as const,
+      sessionId: sessionKey,
+      updatedAt: 1_000,
+      status: "running" as const,
+      startedAt: 1_000,
+      abortedLastRun: false,
+    };
+    vi.mocked(loadGatewaySessionRow).mockImplementation(() => persistedRow);
+    persistGatewaySessionLifecycleEventMock.mockImplementation(async ({ event }) => {
+      persistedRow = {
+        ...persistedRow,
+        ...deriveGatewaySessionLifecycleSnapshot({ session: persistedRow, event }),
+      };
+    });
+    const { broadcast, broadcastToConnIds, chatRunState, handler, sessionEventSubscribers } =
+      createHarness({
+        lifecycleErrorRetryGraceMs: 0,
+        resolveSessionKeyForRun: () => sessionKey,
+      });
+    sessionEventSubscribers.subscribe("conn-selected");
+    registerChatRun(chatRunState, runId, sessionKey, clientRunId);
+    registerAgentRunContext(runId, {
+      lifecycleGeneration,
+      sessionId: sessionKey,
+      sessionKey,
+    });
+    const stop = onAgentRuntimeEvent(handler);
+    const terminal = createAgentLifecycleTerminalBackstop({
+      runId,
+      sessionKey,
+      startedAt: 1_000,
+      getLifecycleGeneration: () => lifecycleGeneration,
+      resolveTerminationFields: () => ({}),
+    });
+    const failure = new OAuthRefreshFailureError({
+      provider: "openai",
+      profileId: "openai:default",
+      message: `OAuth token refresh failed for openai: {"error":{"message":"${oauthRefreshSummary}","refresh_token":"must-not-leak"}}`,
+      reason: "refresh_token_reused",
+      summary: oauthRefreshSummary.replace(/^⚠️\s*/u, ""),
+      diagnostic: oauthRefreshDiagnostic,
+      status: 401,
+    });
+
+    try {
+      terminal.emit("error", failure);
+      await waitForFast(() => {
+        expect(persistGatewaySessionLifecycleEventMock).toHaveBeenCalledOnce();
+        expect(
+          broadcastToConnIds.mock.calls.filter(([event]) => event === "sessions.changed"),
+        ).toHaveLength(1);
+      });
+    } finally {
+      stop();
+    }
+
+    const chatError = chatBroadcastCalls(broadcast).find(
+      ([, payload]) => (payload as { state?: string }).state === "error",
+    )?.[1] as { errorMessage?: string; runId?: string } | undefined;
+    expect(chatError).toEqual(expect.objectContaining({ errorMessage: oauthRefreshDisplay }));
+    expect(chatError?.runId).toBe(clientRunId);
+    const persistParams = requireRecord(
+      requireMockArg(persistGatewaySessionLifecycleEventMock, 0, 0, "persist lifecycle params"),
+      "persist lifecycle params",
+    );
+    expect(requireRecord(persistParams.event, "persist lifecycle event").data).toMatchObject({
+      error: oauthRefreshDisplay,
+      phase: "error",
+    });
+    expect(persistedRow.lastRunError).toBe(oauthRefreshSummary);
+    const sessionChange = broadcastToConnIds.mock.calls.find(
+      ([event]) => event === "sessions.changed",
+    );
+    expect(sessionChange?.[2]).toEqual(new Set(["conn-selected"]));
+    expect(requireRecord(sessionChange?.[1], "sessions changed payload").session).toMatchObject({
+      lastRunError: oauthRefreshSummary,
+      status: "failed",
+    });
+    expect(JSON.stringify({ chatError, persistedRow, sessionChange })).not.toContain(
+      "must-not-leak",
+    );
+    expect(JSON.stringify({ chatError, persistedRow, sessionChange })).not.toContain(
+      '"refresh_token"',
+    );
   });
 
   it("keeps deferred lifecycle-error cleanup across later non-terminal events", () => {

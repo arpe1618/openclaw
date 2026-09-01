@@ -163,6 +163,32 @@ describe("OpenAI Codex OAuth flow", () => {
     expect(String(error)).not.toContain('"error"');
   });
 
+  it("keeps authorization-code exchange failures structured without raw response fields", async () => {
+    const providerMessage = "The authorization code is invalid or expired.";
+    mockTokenResponse(
+      {
+        error: {
+          message: providerMessage,
+          type: "invalid_grant",
+          code: "invalid_grant",
+          access_token: "must-not-leak",
+        },
+      },
+      400,
+    );
+
+    await expect(
+      exchangeOpenAIAuthorizationCode("code", "verifier", "http://localhost/callback"),
+    ).resolves.toEqual({
+      type: "failed",
+      status: 400,
+      reason: "invalid_grant",
+      summary: providerMessage,
+      diagnostic:
+        "OpenAI Codex token exchange failed (HTTP 400; code=invalid_grant; type=invalid_grant).",
+    });
+  });
+
   it.each([
     ["malformed JSON", "{not-json", undefined],
     ["unknown JSON", JSON.stringify({ access_token: "must-not-leak" }), undefined],

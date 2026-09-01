@@ -2,6 +2,7 @@ import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
 import {
   classifyOAuthRefreshFailure,
   classifyOAuthRefreshFailureError,
+  resolveOAuthRefreshFailurePresentation,
 } from "../../agents/auth-profiles/oauth-refresh-failure.js";
 import {
   isCompactionFailureError,
@@ -141,7 +142,12 @@ export async function handleAgentExecutionError(params: {
       }),
     };
   }
-  const message = formatErrorMessage(err);
+  const oauthRefreshPresentation = resolveOAuthRefreshFailurePresentation(err);
+  const message = oauthRefreshPresentation
+    ? [oauthRefreshPresentation.summary, oauthRefreshPresentation.diagnostic]
+        .filter((value): value is string => Boolean(value))
+        .join("\n\n")
+    : formatErrorMessage(err);
   params.timing.logIfSlow({
     runId: params.runId,
     sessionId: turn.followupRun.run.sessionId,
