@@ -16,6 +16,7 @@ import { RealtimeTalkLevelSignal } from "./realtime-talk-level.ts";
 
 const HOLD_ARM_DELAY_MS = 150,
   HOLD_PROGRESS_MS = 350;
+const FINAL_TRANSCRIPT_MAX_WAIT_MS = 10_000;
 const DICTATION_ENCODING = "g711_ulaw";
 const DICTATION_SAMPLE_RATE_HZ = 8000;
 const MAX_PENDING_AUDIO_SAMPLES = DICTATION_SAMPLE_RATE_HZ * 10;
@@ -128,6 +129,8 @@ class ComposerDictationSession {
   private stopped = false;
   private discarded = false;
   private failed = false;
+  private gatewayDisconnected = false;
+  private settleLateFinalDrain: ((discard: boolean) => void) | null = null;
 
   constructor(
     private readonly client: GatewayBrowserClient,
@@ -189,7 +192,9 @@ class ComposerDictationSession {
     return this.transcriptIncludingPartial();
   }
 
-  async finish(): Promise<void> {
+  async finish(drainFinalTranscript = false): Promise<string> {
+    const lateFinal =
+      drainFinalTranscript && !this.gatewayDisconnected ? this.waitForLateFinal() : null;
     await this.stopCapture();
     await this.startPromise?.catch((error: unknown) => {
       if (!isAbortError(error)) {
@@ -198,6 +203,7 @@ class ComposerDictationSession {
     });
     await this.appendChain;
     await this.closeRemote();
+    return lateFinal ? await lateFinal : this.transcriptIncludingPartial();
   }
 
   async cancel(): Promise<void> {
@@ -209,7 +215,13 @@ class ComposerDictationSession {
   }
 
   markGatewayDisconnected(): boolean {
+    this.gatewayDisconnected = true;
+    this.settleLateFinalDrain?.(false);
     return this.hasTranscript();
+  }
+
+  cancelPendingFinal(): void {
+    this.settleLateFinalDrain?.(true);
   }
 
   private appendAudio(samples: Float32Array): void {
@@ -261,11 +273,6 @@ class ComposerDictationSession {
     ) {
       return;
     }
-    if (payload.type === "partial" && typeof payload.text === "string") {
-      this.currentPartial = payload.text.trim();
-      this.callbacks.onTranscriptChange();
-      return;
-    }
     if (payload.type === "transcript" && typeof payload.text === "string") {
       const text = payload.text.trim();
       if (payload.final !== true) {
@@ -277,6 +284,11 @@ class ComposerDictationSession {
         this.finalTranscripts.push(text);
         this.currentPartial = "";
       }
+      this.callbacks.onTranscriptChange();
+      return;
+    }
+    if (payload.type === "partial" && typeof payload.text === "string") {
+      this.currentPartial = payload.text.trim();
       this.callbacks.onTranscriptChange();
       return;
     }
@@ -317,7 +329,6 @@ class ComposerDictationSession {
     this.stopped = true;
     this.input.stop();
     this.inputPump.stop();
-    // Retire UI events immediately; queued audio may still drain into remote close.
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.inputMeter?.stop();
@@ -336,6 +347,43 @@ class ComposerDictationSession {
       .catch(() => undefined);
     return this.closePromise;
   }
+
+  private waitForLateFinal(): Promise<string> {
+    return new Promise((resolve) => {
+      const transcripts: string[] = [];
+      let settled = false;
+      let unsubscribe = () => {};
+      const finish = (text: string) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        globalThis.clearTimeout(timer);
+        unsubscribe();
+        this.settleLateFinalDrain = null;
+        resolve(text);
+      };
+      const transcript = () => transcripts.join(" ").trim();
+      const timer = globalThis.setTimeout(() => finish(transcript()), FINAL_TRANSCRIPT_MAX_WAIT_MS);
+      unsubscribe = this.client.addEventListener((frame) => {
+        const payload = eventPayload(frame);
+        if (!payload || payload.transcriptionSessionId !== this.transcriptionSessionId) {
+          return;
+        }
+        if (
+          payload.type === "transcript" &&
+          payload.final === true &&
+          typeof payload.text === "string" &&
+          payload.text.trim()
+        ) {
+          transcripts.push(payload.text.trim());
+        } else if (payload.type === "error" || payload.type === "close") {
+          finish(transcript());
+        }
+      });
+      this.settleLateFinalDrain = (discard) => finish(discard ? "" : transcript());
+    });
+  }
 }
 
 export class ComposerDictationController {
@@ -350,6 +398,7 @@ export class ComposerDictationController {
   private suppressClick = false;
   private suppressedPointerId: number | null = null;
   private suppressClickTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  private pendingCommitSession: ComposerDictationSession | null = null;
   private disposed = false;
 
   constructor(options: ComposerDictationControllerOptions) {
@@ -399,6 +448,9 @@ export class ComposerDictationController {
 
   update(options: ComposerDictationControllerOptions): void {
     this.options = options;
+    if (!options.connected) {
+      this.pendingCommitSession?.markGatewayDisconnected();
+    }
     if (this.phase === "stopping") {
       return;
     }
@@ -471,6 +523,7 @@ export class ComposerDictationController {
 
   dispose(): void {
     this.disposed = true;
+    this.retirePendingCommit();
     this.clearClickSuppression();
     void this.stop({ commit: false });
   }
@@ -592,6 +645,7 @@ export class ComposerDictationController {
         }
       },
     });
+    this.retirePendingCommit();
     this.session = session;
     try {
       await session.start();
@@ -623,16 +677,46 @@ export class ComposerDictationController {
     if (committed) {
       this.options.onCommit(transcript);
     }
-    // UI ownership ends at the operator action. Provider close can be slow, but
-    // it must never retain the composer in a transient finalizing state.
-    const close = options.commit ? session.finish() : session.cancel();
-    void close.catch(() => undefined);
-    return Promise.resolve(committed);
+    if (!options.commit) {
+      void session.cancel().catch(() => undefined);
+      return Promise.resolve(false);
+    }
+    if (committed) {
+      void session.finish().catch(() => undefined);
+      return Promise.resolve(true);
+    }
+    // The composer unlocks immediately, while this exact stopped session keeps
+    // ownership of its bounded first-final drain until a new session supersedes it.
+    this.pendingCommitSession = session;
+    return session
+      .finish(true)
+      .then((lateTranscript) => {
+        const ownsPendingCommit = this.pendingCommitSession === session;
+        if (ownsPendingCommit) {
+          this.pendingCommitSession = null;
+        }
+        if (!ownsPendingCommit || !lateTranscript || !wasActive || this.disposed) {
+          return false;
+        }
+        this.options.onCommit(lateTranscript);
+        return true;
+      })
+      .catch(() => {
+        if (this.pendingCommitSession === session) {
+          this.pendingCommitSession = null;
+        }
+        return false;
+      });
   }
 
   private reset(): void {
     this.inputLevel.set(0);
     this.setPhase("idle");
+  }
+
+  private retirePendingCommit(): void {
+    this.pendingCommitSession?.cancelPendingFinal();
+    this.pendingCommitSession = null;
   }
 
   private clearPointerGesture(): void {
