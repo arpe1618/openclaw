@@ -286,6 +286,7 @@ export function createTalkClientGatewayControlOwner(params: {
       context: params.context,
       clientConnId: params.connId,
       sessionTarget: params.sessionTarget,
+      scope: { kind: "voice-session", voiceSessionId: params.voiceSessionId },
       assertCurrent: assertActive,
     });
     const result = await (params.controlAgentRun ?? controlRealtimeVoiceAgentRun)({

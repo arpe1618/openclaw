@@ -44,8 +44,9 @@ capability and keep their data channel and client transcript reporting.
 In Gateway-controlled native calls and native Gateway relays, asking for status
 keeps the current agent task running. Spoken cancellation stops that task without
 starting another consultation, even if the provider delegates the same control
-input. When no task is active, status and cancellation return a spoken no-active-run
-response. Genuine new tasks still supersede the running native delegation.
+input. When no task is active in that call, status and cancellation return a spoken
+no-active-run response, even if another call on the same connection and agent session
+has work in progress. Genuine new tasks still supersede the running native delegation.
 
 Closing a native transport fences new delegations and late provider delivery;
 already accepted agent work retains its own cancellation lifetime. Spoken run
@@ -120,7 +121,11 @@ startup, creation fails rather than switching sessions; retry the request.
 Gateway-owned provider consultations and steering retain the prepared agent,
 canonical session key, and store. Agent replies stay in the same session as voice
 transcripts, including under global scope, while the original key continues to
-identify the voice call.
+identify the voice call. Provider-attached controls and `talk.session.steer` select
+only work bound to that logical voice call. Reusing `voiceSessionId` to replace a
+browser transport preserves control of its accepted work. The legacy
+`talk.client.steer` RPC remains session-scoped: it selects owned work by
+`sessionKey`, not by a voice call ID.
 
 Keep the original `sessionKey` for client transcript, tool-call, and close requests.
 `talk.client.close` requires both that exact key and the returned `voiceSessionId`;

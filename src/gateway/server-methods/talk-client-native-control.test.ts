@@ -199,7 +199,7 @@ async function withNativePlugin(
         broadcastToConnIds: broadcast,
         logGateway: { warn: vi.fn() },
       } as unknown as GatewayRequestContext;
-      let voiceSessionId: string | undefined;
+      const voiceSessionIds: string[] = [];
       try {
         if (!openaiPlugin.register) {
           throw new Error("OpenAI did not expose its public registration entry");
@@ -268,11 +268,15 @@ async function withNativePlugin(
               silenceDurationMs: 400,
               capabilities: negotiated ? ["gateway-control-v1"] : ["voice-transcript"],
             });
-            voiceSessionId = requireString(result, "voiceSessionId");
+            voiceSessionIds.push(requireString(result, "voiceSessionId"));
             return result;
           },
           invoke: async (method, params) => {
-            await call(method, { sessionKey: SESSION_KEY, voiceSessionId, ...params });
+            await call(method, {
+              sessionKey: SESSION_KEY,
+              voiceSessionId: voiceSessionIds.at(-1),
+              ...params,
+            });
           },
           offer: (token, sdp) => {
             const request = Object.assign(createMockIncomingRequest([sdp]), {
@@ -288,7 +292,7 @@ async function withNativePlugin(
           chatAbortControllers: context.chatAbortControllers,
         });
       } finally {
-        if (voiceSessionId) {
+        for (const voiceSessionId of voiceSessionIds) {
           await closeTalkClientGatewayControlSession({
             voiceSessionId,
             sessionKey: SESSION_KEY,
@@ -309,12 +313,16 @@ async function connectNativeSession(
   { create, offer }: Pick<NativePluginFixture, "create" | "offer">,
   negotiated = true,
 ) {
+  const socketIndex = upstream.sockets.length;
+  const fetchCount = upstream.fetch.mock.calls.length;
   const result = await create(negotiated);
   expect(result.clientControl).toEqual(negotiated ? { owner: "gateway" } : undefined);
+  expect(upstream.fetch).toHaveBeenCalledTimes(fetchCount);
   const sdp = negotiated ? AUDIO_SDP : DATA_CHANNEL_SDP;
   const { handling, response } = offer(requireString(result, "clientSecret"), sdp);
-  await vi.waitFor(() => expect(upstream.sockets).toHaveLength(1));
-  const socket = upstream.sockets[0];
+  await vi.waitFor(() => expect(upstream.sockets).toHaveLength(socketIndex + 1));
+  expect(response.end).not.toHaveBeenCalled();
+  const socket = upstream.sockets[socketIndex];
   if (!socket) {
     throw new Error("Missing native sideband");
   }
@@ -353,7 +361,7 @@ describe("native Talk through the public OpenAI plugin registration", () => {
       }
       return new Response("v=native-answer\r\n", {
         status: 201,
-        headers: { Location: "/v1/live/rtc_native_test" },
+        headers: { Location: `/v1/live/rtc_native_test_${upstream.fetch.mock.calls.length}` },
       });
     });
     vi.stubGlobal("fetch", upstream.fetch);
@@ -371,19 +379,7 @@ describe("native Talk through the public OpenAI plugin registration", () => {
 
   it("negotiates Gateway control and persists native sideband speech without client control", async () => {
     await withNativePlugin(async ({ create, offer, invoke, broadcast }) => {
-      const result = await create(true);
-      expect(result.clientControl).toEqual({ owner: "gateway" });
-      expect(upstream.fetch).not.toHaveBeenCalled();
-      const { handling, response } = offer(requireString(result, "clientSecret"), AUDIO_SDP);
-      await vi.waitFor(() => expect(upstream.sockets).toHaveLength(1));
-      expect(response.end).not.toHaveBeenCalled();
-      const socket = upstream.sockets[0];
-      if (!socket) {
-        throw new Error("Missing native sideband");
-      }
-      socket.open();
-      await handling;
-      expect(response.res.statusCode).toBe(200);
+      const { result, socket } = await connectNativeSession({ create, offer });
       expect(talkEventTypes(broadcast).filter((type) => type === "session.ready")).toHaveLength(1);
       socket.serverEvent({ type: "turn.done", turn: { role: "user", transcript: "Hello voice" } });
       socket.serverEvent({
@@ -459,6 +455,18 @@ describe("native Talk through the public OpenAI plugin registration", () => {
           });
           const transcript = { type: "turn.done", turn: { role: "user", transcript: text } };
           const delegation = nativeDelegation("control-request", text);
+          const idle = await connectNativeSession({ create, offer });
+          expect(idle.result.voiceSessionId).not.toBe(result.voiceSessionId);
+          idle.socket.serverEvent(delegation);
+          idle.socket.serverEvent(transcript);
+          const idleReply =
+            text === "cancel"
+              ? "There is no active OpenClaw run to cancel."
+              : "I'm not working on an active request right now.";
+          await vi.waitFor(() => expect(idle.socket.sent.join("\n")).toContain(idleReply));
+          expect(abortSignal.aborted).toBe(false);
+          expect(abortOwned).not.toHaveBeenCalled();
+          expect(upstream.runEmbeddedAgent).toHaveBeenCalledOnce();
           const waitForControlReply = () =>
             vi.waitFor(() =>
               expect(socket.sent.join("\n")).toContain("Internal OpenClaw voice control result."),
@@ -489,9 +497,11 @@ describe("native Talk through the public OpenAI plugin registration", () => {
           ).toHaveLength(1);
           expect(
             readSessionTranscriptMessageEvents({ agentId: AGENT_ID, sessionId: SESSION_ID }),
-          ).toMatchObject([
-            { event: { message: { role: "user", content: [{ type: "text", text }] } } },
-          ]);
+          ).toMatchObject(
+            [text, text].map((transcript) => ({
+              event: { message: { role: "user", content: [{ type: "text", text: transcript }] } },
+            })),
+          );
           if (text === "Status?") {
             expect(abortOwned).not.toHaveBeenCalled();
             expect(chatAbortControllers.has(runId)).toBe(true);

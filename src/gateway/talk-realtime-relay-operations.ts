@@ -476,6 +476,7 @@ export async function steerTalkRealtimeRelayAgentRun(params: {
     context: session.context,
     clientConnId: session.connId,
     sessionTarget: session.sessionTarget,
+    scope: { kind: "voice-session", voiceSessionId: session.id },
     assertCurrent: () => {
       params.assertCurrent?.();
       if (relaySessions.get(session.id) !== session) {

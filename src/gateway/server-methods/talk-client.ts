@@ -293,6 +293,7 @@ export const talkClientHandlers: GatewayRequestHandlers = {
         context,
         clientConnId: client?.connId,
         sessionTarget: target,
+        scope: { kind: "session" },
         assertCurrent: sessionMutationAuthorization?.assertCurrent,
       });
       if (runTarget === null) {
