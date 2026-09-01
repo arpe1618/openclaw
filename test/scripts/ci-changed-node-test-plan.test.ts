@@ -345,6 +345,12 @@ describe("CI changed Node test plan", () => {
     ).toBe(true);
   });
 
+  it("routes cron migration changes through the built Gateway readiness regression", () => {
+    const plan = resolveChangedTestTargetPlan(["src/commands/doctor/cron/store-migration.ts"]);
+    expect(plan.mode).toBe("targets");
+    expect(plan.targets).toContain("test/doctor-copied-state-migration.e2e.test.ts");
+  });
+
   it("fails safe whenever a diff deletes source files", () => {
     expect(createChangedNodeTestShards(["src/infra/format-time/deleted-helper.ts"])).toBeNull();
     expect(

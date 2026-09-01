@@ -3,6 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import {
+  loadCronJobsStoreWithConfigJobsReadOnly,
+  loadCronQuarantinedJobs,
+} from "../src/cron/store.js";
 import { OPENCLAW_STATE_SCHEMA_SQL } from "../src/state/openclaw-state-schema.js";
 import { createOpenClawTestInstance } from "./helpers/openclaw-test-instance.js";
 
@@ -172,7 +176,86 @@ function writeHistoricalCopiedStateFixture(stateDir: string): void {
   }
 }
 
+function writeLegacyCronStoreFixture(stateDir: string): string {
+  const storePath = path.join(stateDir, "cron", "jobs.json");
+  const job = {
+    name: "Legacy automation",
+    enabled: true,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    schedule: { kind: "cron", expr: "0 9 * * *" },
+    sessionTarget: "main",
+    wakeMode: "now",
+    payload: { kind: "systemEvent", text: "tick" },
+    state: {},
+  };
+  fs.mkdirSync(path.dirname(storePath), { recursive: true });
+  fs.writeFileSync(
+    storePath,
+    JSON.stringify({
+      version: 1,
+      jobs: [
+        { ...job, id: "valid-job" },
+        { ...job, id: "invalid-state-job", state: { nextRunAtMs: -1 } },
+        { ...job, id: "invalid-trigger-job", trigger: { script: [] } },
+      ],
+    }),
+  );
+  return storePath;
+}
+
 describe("doctor copied-state migration", () => {
+  it(
+    "quarantines every invalid legacy automation before Gateway readiness",
+    { timeout: 45_000 },
+    async () => {
+      const instance = await createOpenClawTestInstance({
+        name: "doctor-cron-upgrade-ready",
+        config: { gateway: { mode: "local", auth: { mode: "none" } } },
+        env: {
+          OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
+          OPENCLAW_NO_RESPAWN: "1",
+          OPENCLAW_SKIP_CRON: undefined,
+          OPENCLAW_SKIP_PROVIDERS: undefined,
+          OPENCLAW_TEST_FAST: "1",
+          OPENCLAW_TEST_MINIMAL_GATEWAY: undefined,
+          NO_COLOR: "1",
+        },
+        startTimeoutMs: 30_000,
+      });
+      try {
+        await instance.entrypoint();
+        const storePath = writeLegacyCronStoreFixture(instance.stateDir);
+
+        try {
+          await instance.startGateway();
+          const response = await fetch(`http://127.0.0.1:${instance.port}/readyz`);
+          expect(response.status).toBe(200);
+          await expect(response.json()).resolves.toMatchObject({ ready: true, failing: [] });
+        } finally {
+          await instance.stopGateway();
+        }
+
+        const loaded = await loadCronJobsStoreWithConfigJobsReadOnly(storePath, instance.env);
+        expect(loaded.store.jobs.map((entry) => entry.id)).toEqual(["valid-job"]);
+        expect(
+          loadCronQuarantinedJobs(storePath, instance.env).map((entry) => ({
+            sourceIndex: entry.sourceIndex,
+            reason: entry.reason,
+            id: entry.job?.id,
+          })),
+        ).toEqual([
+          { sourceIndex: 1, reason: "invalid-state", id: "invalid-state-job" },
+          { sourceIndex: 2, reason: "invalid-trigger", id: "invalid-trigger-job" },
+        ]);
+        expect(fs.existsSync(storePath)).toBe(false);
+        expect(fs.existsSync(`${storePath}.migrated`)).toBe(true);
+      } finally {
+        await instance.cleanup();
+      }
+    },
+  );
+
   it(
     "repairs the retained 2026.6.1-beta.1 shared state before gateway readiness",
     { timeout: 180_000 },

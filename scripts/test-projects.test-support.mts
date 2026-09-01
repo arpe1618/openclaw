@@ -570,6 +570,16 @@ const BROAD_CHANGED_FALLBACK_PATTERNS = [
 ];
 const PRECISE_SOURCE_TEST_TARGETS = new Map<string, string[]>([
   [
+    "src/commands/doctor/cron/store-migration.ts",
+    [
+      "src/commands/doctor/cron/store-migration.schedule-kind.test.ts",
+      "src/commands/doctor/cron/store-migration.test.ts",
+      "src/commands/doctor/cron/scheduled-tool-policy-migration.test.ts",
+      "src/cron/store.test.ts",
+      "test/doctor-copied-state-migration.e2e.test.ts",
+    ],
+  ],
+  [
     "patches/vitest@4.1.11.patch",
     [
       "test/scripts/run-vitest-profile.test.ts",
