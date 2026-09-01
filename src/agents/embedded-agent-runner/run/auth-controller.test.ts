@@ -13,10 +13,7 @@ import {
   resolveSecretSentinel,
 } from "../../../secrets/sentinel.js";
 import type { AuthProfileStore } from "../../auth-profiles.js";
-import {
-  OAuthRefreshFailureError,
-  resolveOAuthRefreshFailurePresentation,
-} from "../../auth-profiles/oauth-refresh-failure.js";
+import { OAuthRefreshFailureError } from "../../auth-profiles/oauth-refresh-failure.js";
 import { resolveAuthProfileOrder } from "../../auth-profiles/order.js";
 import { ensureAuthProfileStore, saveAuthProfileStore } from "../../auth-profiles/store.js";
 import { FailoverError } from "../../failover-error.js";
@@ -112,7 +109,6 @@ function createMutableEmbeddedRunAuthController(params: {
   fallbackConfigured?: boolean;
   lockedProfileId?: string;
   allowTransientCooldownProbe?: boolean;
-  authProfileStateMode?: "read-write" | "read-only";
   warn?: (message: string) => void;
   agentDir?: string;
   prepareModelForAuthProfile?: Parameters<
@@ -136,7 +132,6 @@ function createMutableEmbeddedRunAuthController(params: {
     attemptedThinking: new Set(),
     fallbackConfigured: params.fallbackConfigured ?? false,
     allowTransientCooldownProbe: params.allowTransientCooldownProbe ?? false,
-    authProfileStateMode: params.authProfileStateMode,
     getProvider: () => "custom-openai",
     getModelId: () => "test-model",
     getRuntimeModel: () => params.harness.runtimeModel,
@@ -504,57 +499,6 @@ describe("createEmbeddedRunAuthController", () => {
       }
     },
   );
-
-  it("preserves structured refresh presentation without writes in read-only auth state", async () => {
-    const profileId = "custom-openai:oauth";
-    const summary = "Please sign in again.";
-    const diagnostic = "OpenAI Codex token refresh failed (HTTP 401).";
-    const authStore: AuthProfileStore = {
-      version: 1,
-      profiles: {
-        [profileId]: {
-          type: "oauth",
-          provider: "custom-openai",
-          access: "expired-access",
-          refresh: "expired-refresh",
-          expires: 0,
-        },
-      },
-    };
-    mocks.getApiKeyForModelCore.mockRejectedValueOnce(
-      new OAuthRefreshFailureError({
-        provider: "custom-openai",
-        profileId,
-        message: summary,
-        reason: "revoked",
-        summary,
-        diagnostic,
-        status: 401,
-      }),
-    );
-    const warn = vi.fn<(message: string) => void>();
-    const controller = createMutableEmbeddedRunAuthController({
-      harness: createMutableAuthControllerHarness(),
-      setRuntimeApiKey: vi.fn(),
-      profileCandidates: [profileId],
-      authStore,
-      authProfileStateMode: "read-only",
-      warn,
-    });
-
-    const failure = await controller.initializeAuthProfile().catch((error: unknown) => error);
-
-    expect(resolveOAuthRefreshFailurePresentation(failure)).toEqual({
-      summary,
-      diagnostic,
-      reason: "revoked",
-      status: 401,
-    });
-    expect(authStore.usageStats).toBeUndefined();
-    expect(warn).toHaveBeenCalledWith(
-      `auth profile "${profileId}" failed for provider "custom-openai": ${summary}`,
-    );
-  });
 
   it("unwraps a sentinel for runtime auth exchange but keeps auth storage opaque", async () => {
     const harness = createMutableAuthControllerHarness();
