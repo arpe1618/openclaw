@@ -889,6 +889,30 @@ describe("modelsAuthLoginCommand", () => {
     expect((readMockCallArg(runProviderAuth) as AuthRunCall).signal).toBe(abortController.signal);
   });
 
+  it("does not apply the CLI state-directory guard to the shared login flow", async () => {
+    const runtime = createRuntime();
+    const cliStateDir = "/tmp/openclaw/cli-state";
+    const gatewayStateDir = "/tmp/openclaw/gateway-state";
+    mocks.checkCliGatewayStateDir.mockImplementation(() => {
+      throw new Error(
+        `No credentials were written. state directories (CLI: ${cliStateDir}; Gateway: ${gatewayStateDir}).`,
+      );
+    });
+
+    await expect(
+      runModelsAuthLoginFlowCore({
+        provider: "openai",
+        method: "oauth",
+        config: currentConfig,
+        runtime,
+        prompter: mocks.createClackPrompter(),
+      }),
+    ).resolves.toMatchObject({ providerId: "openai", methodId: "oauth" });
+
+    expect(mocks.checkCliGatewayStateDir).not.toHaveBeenCalled();
+    expect(runProviderAuth).toHaveBeenCalledOnce();
+  });
+
   it("does not persist credentials returned after app-owned cancellation", async () => {
     const runtime = createRuntime();
     const abortController = new AbortController();

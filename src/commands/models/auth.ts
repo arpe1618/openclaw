@@ -566,18 +566,8 @@ async function runProviderAuthMethod(params: {
   isRemote?: boolean;
   signal?: AbortSignal;
   openUrl?: (url: string) => Promise<void>;
-  allowStateDirMismatch?: boolean;
-  stateDirCommand?: string;
 }): Promise<{ result: ProviderAuthResult; profiles: ProviderAuthResult["profiles"] }> {
   params.signal?.throwIfAborted();
-  if (params.stateDirCommand) {
-    await ensureAuthStateDir(
-      params.config,
-      params.allowStateDirMismatch,
-      params.stateDirCommand,
-      params.runtime,
-    );
-  }
   const result = await params.method.run({
     config: params.config,
     env: params.env ?? process.env,
@@ -664,6 +654,12 @@ export async function modelsAuthSetupTokenCommand(
   if (!method) {
     throw new Error(`Provider "${provider.id}" does not expose a token auth method.`);
   }
+  await ensureAuthStateDir(
+    config,
+    opts.allowStateDirMismatch,
+    "openclaw models auth setup-token",
+    runtime,
+  );
 
   await runProviderAuthMethod({
     config,
@@ -674,8 +670,6 @@ export async function modelsAuthSetupTokenCommand(
     method,
     runtime,
     prompter,
-    allowStateDirMismatch: opts.allowStateDirMismatch,
-    stateDirCommand: "openclaw models auth setup-token",
   });
 }
 
@@ -870,6 +864,12 @@ export async function modelsAuthAddCommand(
           `Unknown token auth method "${methodId}". Run ${formatCliCommand("openclaw models auth login --provider " + providerPlugin.id)} to choose interactively.`,
         );
       }
+      await ensureAuthStateDir(
+        config,
+        opts.allowStateDirMismatch,
+        "openclaw models auth add",
+        runtime,
+      );
       await runProviderAuthMethod({
         config,
         agentId,
@@ -879,8 +879,6 @@ export async function modelsAuthAddCommand(
         method,
         runtime,
         prompter,
-        allowStateDirMismatch: opts.allowStateDirMismatch,
-        stateDirCommand: "openclaw models auth add",
       });
       return;
     }
@@ -1082,13 +1080,6 @@ export async function runModelsAuthLoginFlowCore(
       `Unknown auth method. Run ${formatCliCommand("openclaw models auth login --provider " + selectedProvider.id)} without --method to choose interactively.`,
     );
   }
-  await ensureAuthStateDir(
-    context.config,
-    opts.allowStateDirMismatch,
-    "openclaw models auth login",
-    opts.runtime,
-  );
-
   if (opts.force) {
     // Purge existing profiles for this provider only after we have a valid
     // auth method to invoke. Running the purge earlier (before method
@@ -1154,6 +1145,12 @@ export async function modelsAuthLoginCommand(opts: LoginOptions, runtime: Runtim
     );
   }
 
+  await ensureAuthStateDir(
+    undefined,
+    opts.allowStateDirMismatch,
+    "openclaw models auth login",
+    runtime,
+  );
   await runModelsAuthLoginFlowCore({
     ...opts,
     runtime,
