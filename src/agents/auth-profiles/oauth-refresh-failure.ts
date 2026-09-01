@@ -37,14 +37,10 @@ export function resolveOAuthRefreshFailurePresentation(
   const seen = new Set<object>();
   let candidate = err;
   while (candidate && typeof candidate === "object") {
-    const record = candidate as {
-      cause?: unknown;
-      diagnostic?: unknown;
-      name?: unknown;
-      reason?: unknown;
-      status?: unknown;
-      summary?: unknown;
-    };
+    const record = asOptionalRecord(candidate);
+    if (!record) {
+      return null;
+    }
     const isOwnedFailure =
       candidate instanceof OAuthRefreshFailureError ||
       record.name === "OpenAICodexTokenFailureError";
