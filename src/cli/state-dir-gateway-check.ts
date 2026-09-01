@@ -141,11 +141,10 @@ export async function checkCliGatewayStateDir(params: {
   } catch {
     return { kind: "unavailable", cliStateDir };
   }
+  // The resolved URL is the only reliable remote test: connection details already fold in
+  // gateway.mode, and callers that pass no config still get the same verdict.
   const hostname = new URL(details.url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (
-    params.config?.gateway?.mode === "remote" ||
-    (hostname !== "localhost" && !["127.0.0.1", "::1"].includes(hostname))
-  ) {
+  if (hostname !== "localhost" && !["127.0.0.1", "::1"].includes(hostname)) {
     params.warn?.(
       `Gateway target ${details.url} is remote. Cross-host comparison is not possible; local writes do not reach the remote Gateway.`,
     );
