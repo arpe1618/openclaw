@@ -128,7 +128,11 @@ function formatTokenRequestError(
   if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
     return `OpenAI Codex token ${operation} timed out after ${timeoutMs}ms`;
   }
-  return `OpenAI Codex token ${operation} error: ${error instanceof Error ? error.message : String(error)}`;
+  const detail = normalizeErrorSummary(error instanceof Error ? error.message : String(error));
+  return (
+    normalizeErrorSummary(`OpenAI Codex token ${operation} error${detail ? `: ${detail}` : ""}`) ??
+    `OpenAI Codex token ${operation} error`
+  );
 }
 
 async function postTokenForm(

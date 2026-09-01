@@ -189,6 +189,31 @@ describe("OpenAI Codex OAuth flow", () => {
     });
   });
 
+  it("rejects oversized credential-bearing refresh transport details", async () => {
+    const secret = "sk-proj-must-not-leak-1234567890";
+    ssrfMocks.fetchWithSsrFGuard.mockRejectedValueOnce(
+      new Error(`Authorization: Bearer ${secret} ${"transport detail ".repeat(80)}`),
+    );
+
+    const result = await refreshOpenAIAccessToken("old-refresh-token");
+
+    expect(result.type).toBe("failed");
+    if (result.type === "failed") {
+      expect(result.summary).toBe("OpenAI Codex token refresh error");
+      expect(result.summary.length).toBeLessThanOrEqual(500);
+      expect(result.summary).not.toContain(secret);
+    }
+  });
+
+  it("retains bounded safe refresh transport details", async () => {
+    ssrfMocks.fetchWithSsrFGuard.mockRejectedValueOnce(new Error("socket closed"));
+
+    await expect(refreshOpenAIAccessToken("old-refresh-token")).resolves.toEqual({
+      type: "failed",
+      summary: "OpenAI Codex token refresh error: socket closed",
+    });
+  });
+
   it.each([
     ["malformed JSON", "{not-json", undefined],
     ["unknown JSON", JSON.stringify({ access_token: "must-not-leak" }), undefined],

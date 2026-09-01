@@ -120,6 +120,24 @@ function mockRotatedOpenAICodexRefresh() {
   });
 }
 
+function createStructuredOpenAIRefreshError(params: {
+  reason?: string;
+  summary: string;
+  status?: number;
+}) {
+  const status = params.status ?? 401;
+  const diagnostic = `OpenAI Codex token refresh failed (HTTP ${status}${
+    params.reason ? `; code=${params.reason}` : ""
+  }).`;
+  return Object.assign(new Error(`${params.summary}\n\n${diagnostic}`), {
+    name: "OpenAICodexTokenFailureError",
+    diagnostic,
+    ...(params.reason ? { reason: params.reason } : {}),
+    status,
+    summary: params.summary,
+  });
+}
+
 function expectPersistedOpenAICodexProfile(
   credential: AuthProfileStore["profiles"][string],
   metadata: Record<string, unknown> = {},
@@ -1104,11 +1122,13 @@ describe("resolveApiKeyForProfile openai refresh fallback", () => {
       agentId: "main",
       path: resolveAuthProfileDatabasePath(agentDir),
     }).db.exec("ALTER TABLE auth_profile_state DROP COLUMN updated_at");
-    getOAuthApiKeyMock.mockImplementationOnce(async () => {
-      throw new Error(
-        '401 {"error":{"message":"Your refresh token has already been used to generate a new access token.","code":"refresh_token_reused"}}',
-      );
-    });
+    refreshProviderOAuthCredentialWithPluginMock.mockRejectedValueOnce(
+      createStructuredOpenAIRefreshError({
+        reason: "refresh_token_reused",
+        summary:
+          "Your refresh token has already been used to generate a new access token. Please try signing in again.",
+      }),
+    );
 
     const failure = await resolveApiKeyForProfile({ store, profileId, agentDir }).catch(
       (error: unknown) => error,
@@ -1132,19 +1152,16 @@ describe("resolveApiKeyForProfile openai refresh fallback", () => {
     async (reason) => {
       const profileId = "openai:default";
       const summary = reason ? `Provider refresh failed: ${reason}.` : "Provider refresh failed.";
-      const diagnostic = `OpenAI Codex token refresh failed (HTTP ${reason ? 401 : 503}).`;
+      const status = reason ? 401 : 503;
+      const diagnostic = `OpenAI Codex token refresh failed (HTTP ${status}${
+        reason ? `; code=${reason}` : ""
+      }).`;
       saveAuthProfileStore(createExpiredOauthStore({ profileId, provider: "openai" }), agentDir, {
         filterExternalAuthProfiles: false,
         syncExternalCli: false,
       });
       refreshProviderOAuthCredentialWithPluginMock.mockRejectedValueOnce(
-        Object.assign(new Error(`${summary}\n\n${diagnostic}`), {
-          name: "OpenAICodexTokenFailureError",
-          diagnostic,
-          ...(reason ? { reason } : {}),
-          status: reason ? 401 : 503,
-          summary,
-        }),
+        createStructuredOpenAIRefreshError({ reason, status, summary }),
       );
 
       const failure = await resolveApiKeyForProfile({
@@ -1159,7 +1176,7 @@ describe("resolveApiKeyForProfile openai refresh fallback", () => {
         provider: "openai",
         profileId,
         reason: reason ?? null,
-        status: reason ? 401 : 503,
+        status,
         summary,
         diagnostic,
       });
@@ -1242,6 +1259,7 @@ describe("resolveApiKeyForProfile openai refresh fallback", () => {
     });
 
     expect(getOAuthApiKeyMock).toHaveBeenCalledTimes(1);
+    expect(refreshProviderOAuthCredentialWithPluginMock).toHaveBeenCalledTimes(1);
     expect((await readPersistedStore(agentDir)).lastGood).toBeUndefined();
   });
 
